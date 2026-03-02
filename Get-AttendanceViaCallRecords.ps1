@@ -419,15 +419,8 @@ foreach ($cr in $allMeetingsToProcess) {
         $reportsUri = "/v1.0/users/$meetingUserId/onlineMeetings/$($meeting.id)/attendanceReports"
         $reports = Invoke-MgGraphPaged -Uri $reportsUri
 
-        # Channel meeting filter: only keep reports matching this call record's time (±5 min)
-        $reports = @($reports | Where-Object {
-            $_.meetingStartDateTime -and
-            [datetime]$_.meetingStartDateTime -ge $mStart.AddMinutes(-5) -and
-            [datetime]$_.meetingStartDateTime -le $mStart.AddMinutes(5)
-        })
-
         if ($reports.Count -eq 0) {
-            Write-Log -Message "  No matching attendance reports for '$($meeting.subject)' (teacher=$($teacherForRow.mail))" -Level "WARN" -LogsDir $config.logsDir
+            Write-Log -Message "  No attendance reports for '$($meeting.subject)' (teacher=$($teacherForRow.mail))" -Level "WARN" -LogsDir $config.logsDir
             $meetingsFailed++
             continue
         }

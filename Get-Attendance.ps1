@@ -56,33 +56,6 @@ function Write-Log {
     }
 }
 
-function Get-AttendanceStatus {
-    param(
-        [datetime]$MeetingStart,
-        [datetime]$MeetingEnd,
-        [nullable[datetime]]$JoinTime,
-        [int]$TotalAttendanceSeconds,
-        [int]$LateThresholdMinutes = 10,
-        [double]$PartialThresholdPercent = 50
-    )
-
-    # Student not in attendance records (v2 — requires roster comparison)
-    if ($null -eq $JoinTime) { return "Absent" }
-
-    $meetingDurationSeconds = ($MeetingEnd - $MeetingStart).TotalSeconds
-    if ($meetingDurationSeconds -le 0) { return "Present" }
-
-    $attendancePercent = ($TotalAttendanceSeconds / $meetingDurationSeconds) * 100
-
-    # Partial overrides Late (low attendance is more significant than late arrival)
-    if ($attendancePercent -lt $PartialThresholdPercent) { return "Partial" }
-
-    $lateCutoff = $MeetingStart.AddMinutes($LateThresholdMinutes)
-    if ($JoinTime -gt $lateCutoff) { return "Late" }
-
-    return "Present"
-}
-
 function Export-AttendanceExcel {
     param(
         [array]$DetailRows,
@@ -187,21 +160,12 @@ $targetMidnight = [DateTime]::SpecifyKind($TargetDate.Date, [DateTimeKind]::Unsp
 $startUtc       = [System.TimeZoneInfo]::ConvertTimeToUtc($targetMidnight, $tz)
 $endUtc         = [System.TimeZoneInfo]::ConvertTimeToUtc($targetMidnight.AddDays(1), $tz)
 
-$startDate = $startUtc
-$endDate   = $endUtc
-
 Write-Log -Message "Extracting attendance for $($TargetDate.ToString('yyyy-MM-dd')) | UTC range: $($startUtc.ToString('o')) to $($endUtc.ToString('o')) | Teachers: $($teachers.Count)" -LogsDir $config.logsDir
 
-# ── Pre-capture scalar values for $using: in parallel blocks ──
-# (Nested property access like $using:config.xxx is not supported in parallel scriptblocks)
+# ── Pre-capture scalar values used in status computation ──
 $lateThreshMin    = $config.lateThresholdMinutes
 $partialThreshPct = $config.partialThresholdPercent
-$tenantId         = $config.tenantId
-$clientId         = $config.clientId
-$clientSecret     = $config.clientSecret
-$logsDir          = $config.logsDir
 
-# ── Connect to Graph ONCE before parallel block ──
 # ── Connect to Graph ONCE before processing ──
 Import-Module Microsoft.Graph.Authentication -RequiredVersion 2.22.0 -ErrorAction Stop
 
@@ -231,8 +195,8 @@ $allResults = foreach ($teacher in $teachers) {
         # With app-only permissions, /users/{id}/onlineMeetings requires a JoinWebUrl filter
         # and must be queried via the meeting ORGANIZER's user ID (not any attendee).
         # So we get calendar events, include the organizer, then query via their ID.
-        $startIso = $startDate.ToString('yyyy-MM-ddTHH:mm:ssZ')
-        $endIso   = $endDate.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $startIso = $startUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
+        $endIso   = $endUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
         $calUri   = "/v1.0/users/$($teacher.id)/calendarView" +
                     "?startDateTime=$startIso&endDateTime=$endIso" +
                     "&`$select=id,subject,start,end,onlineMeeting,isOnlineMeeting,organizer"
@@ -369,15 +333,8 @@ $allResults = foreach ($teacher in $teachers) {
                 continue
             }
 
-            # Keep reports whose actual start falls within the calendar event window (±30 min buffer)
-            $reports = @($reports | Where-Object {
-                $_.meetingStartDateTime -and
-                [datetime]$_.meetingStartDateTime -ge $mStart.AddMinutes(-30) -and
-                [datetime]$_.meetingStartDateTime -le $mEnd.AddMinutes(30)
-            })
-
             if ($reports.Count -eq 0) {
-                Write-Log -Message "    Meeting '$($event.subject)' found but has no attendance reports in time range" -LogsDir $config.logsDir
+                Write-Log -Message "    Meeting '$($event.subject)' found but has no attendance reports" -LogsDir $config.logsDir
                 $processedMeetings.Add($joinUrl) | Out-Null
                 continue
             }
