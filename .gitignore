@@ -7,6 +7,10 @@ teachers.json
 output/
 logs/
 
+# Internal design documents
+01-Solution-Overview.md
+02-Implementation-Spec.md
+
 # Backup / duplicate files
 Get-Attendance copy.ps1
 
