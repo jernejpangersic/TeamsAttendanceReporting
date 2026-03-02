@@ -199,13 +199,15 @@ $allResults = foreach ($teacher in $teachers) {
         $endIso   = $endUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
         $calUri   = "/v1.0/users/$($teacher.id)/calendarView" +
                     "?startDateTime=$startIso&endDateTime=$endIso" +
+                    "&`$filter=isCancelled eq false" +
                     "&`$select=id,subject,start,end,onlineMeeting,isOnlineMeeting,organizer"
         $allEvents = Invoke-MgGraphPaged -Uri $calUri
 
         # Filter to only Teams meetings (client-side, since $filter on isOnlineMeeting isn't supported)
         $events = @($allEvents | Where-Object {
             $_.isOnlineMeeting -eq $true -and
-            $_.onlineMeeting.joinUrl
+            $_.onlineMeeting.joinUrl -and
+            $_.isCancelled -ne $true
         })
 
         Write-Log -Message "  $($teacher.mail): $($allEvents.Count) calendar events, $($events.Count) online meetings" -LogsDir $config.logsDir
