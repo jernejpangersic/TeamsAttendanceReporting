@@ -167,7 +167,7 @@ $lateThreshMin    = $config.lateThresholdMinutes
 $partialThreshPct = $config.partialThresholdPercent
 
 # ── Connect to Graph ONCE before processing ──
-Import-Module Microsoft.Graph.Authentication -RequiredVersion 2.22.0 -ErrorAction Stop
+Import-Module Microsoft.Graph.Authentication -ErrorAction Stop
 
 $secureSecret = ConvertTo-SecureString $config.clientSecret -AsPlainText -Force
 $credential   = New-Object System.Management.Automation.PSCredential($config.clientId, $secureSecret)
@@ -373,8 +373,8 @@ $allResults = foreach ($teacher in $teachers) {
                         MeetingSubject   = $event.subject
                         MeetingStart     = $mStart.ToString('yyyy-MM-ddTHH:mm:ssZ')
                         MeetingEnd       = $mEnd.ToString('yyyy-MM-ddTHH:mm:ssZ')
-                        StudentName      = $record.identity.displayName
-                        StudentEmail     = $record.emailAddress
+                        AttendeeName      = $record.identity.displayName
+                        AttendeeEmail     = $record.emailAddress
                         JoinTime         = if ($joinDt)  { $joinDt.ToString('yyyy-MM-ddTHH:mm:ssZ')  } else { '' }
                         LeaveTime        = if ($leaveDt) { $leaveDt.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { '' }
                         DurationMinutes  = [math]::Round($record.totalAttendanceInSeconds / 60, 1)

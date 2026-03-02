@@ -53,7 +53,7 @@ if (-not $graphSp) {
 
 $permissionNames = @(
     "OnlineMeetingArtifact.Read.All",
-    "OnlineMeeting.Read.All",
+    "OnlineMeetings.Read.All",
     "User.Read.All",
     "Group.Read.All",
     "Calendars.Read",

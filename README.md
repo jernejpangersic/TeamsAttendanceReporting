@@ -43,7 +43,7 @@ Built for M365 Education tenants (A3/A5) using School Data Sync, targeting scena
    | Permission | Purpose |
    |---|---|
    | `OnlineMeetingArtifact.Read.All` | Read attendance reports |
-   | `OnlineMeeting.Read.All` | List meetings per user |
+   | `OnlineMeetings.Read.All` | Resolve meeting objects by join URL |
    | `User.Read.All` | Resolve user identities |
    | `Group.Read.All` | Read teacher group membership |
    | `CallRecords.Read.All` | *(Only for CallRecords variant)* |

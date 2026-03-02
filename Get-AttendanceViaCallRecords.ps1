@@ -364,12 +364,12 @@ foreach ($cr in $allMeetingsToProcess) {
 
         # Use _teacherParticipants attached in Phase 1 (from individual GET or Oid extraction)
         foreach ($p in $cr._teacherParticipants) {
-            $pid = $p.user.id
-            if ($pid -and $teacherIdSet.Contains($pid) -and -not $candidateUserIds.Contains($pid)) {
-                $candidateUserIds.Add($pid)
+            $participantUserId = $p.user.id
+            if ($participantUserId -and $teacherIdSet.Contains($participantUserId) -and -not $candidateUserIds.Contains($participantUserId)) {
+                $candidateUserIds.Add($participantUserId)
                 # Use the first teacher participant for attribution
                 if (-not $teacherForRow) {
-                    $teacherForRow = $teacherLookup[$pid]
+                    $teacherForRow = $teacherLookup[$participantUserId]
                 }
             }
         }
@@ -456,8 +456,8 @@ foreach ($cr in $allMeetingsToProcess) {
                     MeetingSubject   = $meeting.subject
                     MeetingStart     = $mStart.ToString('yyyy-MM-ddTHH:mm:ssZ')
                     MeetingEnd       = $mEnd.ToString('yyyy-MM-ddTHH:mm:ssZ')
-                    StudentName      = $record.identity.displayName
-                    StudentEmail     = $record.emailAddress
+                    AttendeeName      = $record.identity.displayName
+                    AttendeeEmail     = $record.emailAddress
                     JoinTime         = if ($joinDt)  { $joinDt.ToString('yyyy-MM-ddTHH:mm:ssZ')  } else { '' }
                     LeaveTime        = if ($leaveDt) { $leaveDt.ToString('yyyy-MM-ddTHH:mm:ssZ') } else { '' }
                     DurationMinutes  = [math]::Round($record.totalAttendanceInSeconds / 60, 1)
