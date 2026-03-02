@@ -121,8 +121,3 @@ Output is saved to `output/attendance_YYYY-MM-DD.xlsx`.
 | Otherwise | **Present** |
 
 Thresholds are configurable in `config.json` (`lateThresholdMinutes`, `partialThresholdPercent`).
-
-## Documentation
-
-- [01-Solution-Overview.md](01-Solution-Overview.md) — Problem statement, approach comparison, scale analysis, risks
-- [02-Implementation-Spec.md](02-Implementation-Spec.md) — Technical blueprint, API specs, data schemas, deployment runbook
