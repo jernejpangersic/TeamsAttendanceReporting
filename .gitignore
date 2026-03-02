@@ -1,0 +1,24 @@
+# Sensitive configuration (use *.sample.json as templates)
+config.json
+config.test.json
+teachers.json
+
+# Output & logs
+output/
+logs/
+
+# Backup / duplicate files
+Get-Attendance copy.ps1
+
+# PowerShell module cache
+PSModulePath/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Editor
+.vscode/
+*.swp
+*~

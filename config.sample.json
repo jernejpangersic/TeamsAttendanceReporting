@@ -1,0 +1,12 @@
+{
+  "tenantId": "<your-azure-ad-tenant-id>",
+  "clientId": "<your-app-registration-client-id>",
+  "clientSecret": "<your-client-secret>",
+  "teacherGroupId": "<security-group-id-containing-teachers>",
+  "outputDir": "./output",
+  "logsDir": "./logs",
+  "retentionDays": 30,
+  "timezone": "Asia/Riyadh",
+  "lateThresholdMinutes": 10,
+  "partialThresholdPercent": 50
+}
