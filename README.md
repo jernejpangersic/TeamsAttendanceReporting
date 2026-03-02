@@ -19,15 +19,11 @@ Built for M365 Education tenants (A3/A5) using School Data Sync, targeting scena
 
 ```
 ├── config.sample.json               ← Template for tenant configuration
-├── config.json                      ← Your actual config (gitignored)
 ├── teachers.sample.json             ← Template showing teacher list format
-├── teachers.json                    ← Cached teacher list (gitignored, synced via Sync-Teachers.ps1)
 ├── Register-App.ps1                 ← Azure AD app registration helper
 ├── Sync-Teachers.ps1                ← Syncs teachers from Graph → teachers.json
 ├── Get-Attendance.ps1               ← Main script: meetings → attendance → Excel
 ├── Get-AttendanceViaCallRecords.ps1 ← Alternate script using Call Records API
-├── 01-Solution-Overview.md          ← Solution overview & design decisions
-├── 02-Implementation-Spec.md        ← Detailed implementation specification
 ├── output/                          ← Generated Excel files (gitignored)
 └── logs/                            ← Execution logs (gitignored)
 ```
