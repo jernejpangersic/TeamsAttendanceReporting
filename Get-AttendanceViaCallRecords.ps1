@@ -453,6 +453,7 @@ foreach ($cr in $allMeetingsToProcess) {
                     Date             = $mStart.ToString('yyyy-MM-dd')
                     TeacherName      = $teacherForRow.displayName
                     TeacherEmail     = $teacherForRow.mail
+                    Department       = $teacherForRow.department
                     MeetingSubject   = $meeting.subject
                     MeetingStart     = $mStart.ToString('yyyy-MM-ddTHH:mm:ssZ')
                     MeetingEnd       = $mEnd.ToString('yyyy-MM-ddTHH:mm:ssZ')

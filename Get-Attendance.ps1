@@ -370,6 +370,7 @@ $allResults = foreach ($teacher in $teachers) {
                         Date             = $mStart.ToString('yyyy-MM-dd')
                         TeacherName      = $teacher.displayName
                         TeacherEmail     = $teacher.mail
+                        Department       = $teacher.department
                         MeetingSubject   = $event.subject
                         MeetingStart     = $mStart.ToString('yyyy-MM-ddTHH:mm:ssZ')
                         MeetingEnd       = $mEnd.ToString('yyyy-MM-ddTHH:mm:ssZ')

@@ -73,8 +73,9 @@ Connect-MgGraph -TenantId $config.tenantId -ClientSecretCredential $credential -
 Write-Log "Connected to Microsoft Graph (tenant: $($config.tenantId))"
 
 # ── Fetch all group members with pagination ──
+# transitiveMembers recursively resolves nested groups.
 # The /microsoft.graph.user cast returns user properties directly, avoiding per-member round-trips.
-$uri = "/v1.0/groups/$($config.teacherGroupId)/members/microsoft.graph.user" +
+$uri = "/v1.0/groups/$($config.teacherGroupId)/transitiveMembers/microsoft.graph.user" +
        "?`$select=id,displayName,mail,department,officeLocation&`$top=999"
 
 $teachers = [System.Collections.Generic.List[object]]::new()

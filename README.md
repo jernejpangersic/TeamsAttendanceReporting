@@ -31,7 +31,16 @@ Built for M365 Education tenants (A3/A5) using School Data Sync, targeting scena
 ## Prerequisites
 
 1. **PowerShell 7+** (pwsh)
-2. **Microsoft Graph PowerShell SDK**
+2. **Execution policy** — scripts downloaded from the internet are blocked by default. Run one of:
+   ```powershell
+   # Option A: Allow local/remote scripts permanently for your user, then unblock the downloaded files
+   Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+   Get-ChildItem *.ps1 | Unblock-File
+
+   # Option B: Bypass for the current session only (nothing persisted)
+   Set-ExecutionPolicy Bypass -Scope Process
+   ```
+3. **Microsoft Graph PowerShell SDK**
    ```powershell
    Install-Module Microsoft.Graph -Scope CurrentUser
    ```
@@ -48,7 +57,13 @@ Built for M365 Education tenants (A3/A5) using School Data Sync, targeting scena
    | `Group.Read.All` | Read teacher group membership |
    | `CallRecords.Read.All` | *(Only for CallRecords variant)* |
 
-5. **Application access policy** — required for OnlineMeeting/Artifact permissions:
+5. **Application access policy** — required for OnlineMeeting/Artifact permissions.
+   Install the MicrosoftTeams module and connect before running these commands:
+   ```powershell
+   Install-Module MicrosoftTeams -Scope CurrentUser
+   Connect-MicrosoftTeams
+   ```
+   Then create and assign the policy:
    ```powershell
    New-CsApplicationAccessPolicy -Identity "AttendanceReportingPolicy" `
        -AppIds "<your-client-id>" `
@@ -98,11 +113,12 @@ Output is saved to `output/attendance_YYYY-MM-DD.xlsx`.
 | Date | 2026-03-01 |
 | TeacherName | Ms. Al-Rashid |
 | TeacherEmail | a.rashid@school.edu |
+| Department | Contoso High School |
 | MeetingSubject | Biology - Grade 10 |
 | MeetingStart | 2026-03-01 10:00:00 |
 | MeetingEnd | 2026-03-01 10:45:00 |
-| StudentName | Omar Hassan |
-| StudentEmail | o.hassan@school.edu |
+| AttendeeName | Omar Hassan |
+| AttendeeEmail | o.hassan@school.edu |
 | JoinTime | 2026-03-01 10:02:00 |
 | LeaveTime | 2026-03-01 10:44:00 |
 | DurationMinutes | 42 |
