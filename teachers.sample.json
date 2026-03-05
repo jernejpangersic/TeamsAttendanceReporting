@@ -4,13 +4,13 @@
     "displayName": "Jane Smith",
     "mail": "JaneS@contoso.onmicrosoft.com",
     "department": "Contoso High School",
-    "officeLocation": null
+    "state": null
   },
   {
     "id": "00000000-0000-0000-0000-000000000002",
     "displayName": "John Doe",
     "mail": "JohnD@contoso.onmicrosoft.com",
     "department": "Contoso Middle School",
-    "officeLocation": null
+    "state": null
   }
 ]
