@@ -1,7 +1,6 @@
-# Sensitive configuration (use *.sample.json as templates)
-config.json
-config.test.json
-teachers.json
+# JSON files (except *.sample.json templates)
+*.json
+!*.sample.json
 
 # Output & logs
 output/
@@ -11,8 +10,8 @@ logs/
 01-Solution-Overview.md
 02-Implementation-Spec.md
 
-# Backup / duplicate files
-Get-Attendance copy.ps1
+# Archived scripts (pre-v4)
+archive/
 
 # PowerShell module cache
 PSModulePath/
@@ -26,3 +25,9 @@ Desktop.ini
 .vscode/
 *.swp
 *~
+
+# Archives
+*.zip
+
+# Misc
+customer-error.txt

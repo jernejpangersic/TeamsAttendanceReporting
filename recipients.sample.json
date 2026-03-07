@@ -1,0 +1,5 @@
+{
+    "_example": "Enter recipient emails as shown: \"Department Name\": [\"admin@school.edu\", \"it@school.edu\"]",
+    "Contoso High School": [""],
+    "Contoso Middle School": [""]
+}

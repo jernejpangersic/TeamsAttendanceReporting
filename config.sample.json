@@ -6,6 +6,7 @@
   "outputDir": "./output",
   "logsDir": "./logs",
   "retentionDays": 30,
+  "senderEmail": "<sender-email-or-shared-mailbox>",
   "timezone": "Asia/Riyadh",
   "lateThresholdMinutes": 10,
   "partialThresholdPercent": 50

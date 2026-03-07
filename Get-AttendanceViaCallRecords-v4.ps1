@@ -1,55 +1,52 @@
 <#
 .SYNOPSIS
-    Extracts Teams meeting attendance data using Call Records — v3 optimized for
-    large-scale tenants (20k+ meetings/day).
+    Extracts Teams meeting attendance data using Call Records — v4 with fully
+    parallelized meeting resolution AND attendance fetching.
 
 .DESCRIPTION
-    Builds on v2's OID-first filtering and $batch meeting resolution, then pushes
-    the $batch API all the way through attendance fetching.  Instead of dispatching
-    one HTTP call per meeting inside parallel workers (v2), v3 groups meetings into
-    chunks of 20 and processes each chunk with just 2-3 $batch HTTP calls.
+    Builds on v3's chunked-parallel-batch attendance, and extends parallelism to
+    Phase 2a (meeting resolution).  In v3, meeting resolution was sequential
+    ($batch of 20, one HTTP call at a time).  v4 parallelizes it across workers.
 
     Architecture:
-      Phase 1 : Call Record discovery + OID-first filtering        (same as v2)
-      Phase 2a: Meeting resolution via $batch + $select            (same as v2, leaner payloads)
-      Phase 2b: Attendance via Chunked-Parallel-Batch
-                - Split resolved meetings into chunks of 20
-                - Dispatch chunks to parallel workers (ThrottleLimit)
-                - Each worker sends 1 $batch for reports, 1+ $batch for records
-                - Rows are emitted directly from the pipeline
+      Phase 1 : Call Record discovery + OID-first filtering          (same as v3)
+      Phase 2a: Meeting resolution via PARALLEL $batch               (NEW — parallel)
+                - Split candidates into chunks of 200
+                - Each worker sends batches of 20 within its chunk
+                - Workers run at ThrottleLimit concurrency
+      Phase 2b: Attendance via Chunked-Parallel-Batch                (same as v3)
       Phase 3 : Export to Excel
 
-    Key optimisations over v2:
-      - Batched attendance fetching: 20 report/record requests per HTTP round-trip
-      - $select on all Graph calls: ~30-50% smaller JSON payloads
-      - Token refresh: proactive mid-run refresh for long executions (>50 min)
-      - Exponential backoff: 2^n second retry on 429/503/504 (outer + inner batch)
-      - Per-item batch retry: only re-sends throttled items, not the whole batch
-      - Configurable ThrottleLimit: tune parallelism from the command line
+    Key optimisations over v3:
+      - Phase 2a parallelized: ~10x faster meeting resolution
+      - Estimated: 35k meetings resolved in ~5-8 min vs ~55 min (v3)
 
-    Estimated HTTP calls at 20k meetings (assuming 1 report per meeting):
-      v2 :  ~1,000 (resolution) + ~40,000 (attendance)     = ~41,000
-      v3 :  ~1,000 (resolution) + ~2,000 (attendance batch) = ~3,000
+    Estimated HTTP calls at 35k meetings (assuming 1 report per meeting):
+      v3 :  ~1,757 sequential (resolution) + ~1,750 parallel (attendance) = ~3,500
+      v4 :  ~1,757 parallel   (resolution) + ~1,750 parallel (attendance) = ~3,500
+      (Same HTTP count, but Phase 2a is now 10x throughput)
 
     Requires: PowerShell 7+, CallRecords.Read.All (application).
-
-.PARAMETER ConfigPath
-    Path to config.json. Default: .\config.json
 
 .PARAMETER TargetDate
     The date to extract attendance for. Default: yesterday in the configured timezone.
 
+.PARAMETER ConfigPath
+    Path to config.json. Default: .\config.json
+
 .PARAMETER ThrottleLimit
-    Maximum concurrent workers for Phase 2b parallel batch processing. Default: 10.
+    Maximum concurrent workers for parallel phases. Default: 10.
     Higher values are faster but increase risk of Graph 429 throttling.
 
 .EXAMPLE
-    .\Get-AttendanceViaCallRecords-v3.ps1
-    .\Get-AttendanceViaCallRecords-v3.ps1 -TargetDate "2026-03-01" -ThrottleLimit 15
+    .\Get-AttendanceViaCallRecords-v4.ps1
+    .\Get-AttendanceViaCallRecords-v4.ps1 "2026-03-01"
+    .\Get-AttendanceViaCallRecords-v4.ps1 -TargetDate "2026-03-01" -ThrottleLimit 15
 #>
 param(
-    [string]$ConfigPath = ".\config.json",
+    [Parameter(Position = 0)]
     [datetime]$TargetDate,
+    [string]$ConfigPath = ".\config.json",
     [ValidateRange(1, 32)]
     [int]$ThrottleLimit = 10
 )
@@ -74,7 +71,7 @@ function Write-Log {
 
     $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
     $logLine   = "$timestamp | $Level | $Message"
-    $logFile   = Join-Path $LogsDir "callrecords_v3_$(Get-Date -Format 'yyyy-MM-dd').log"
+    $logFile   = Join-Path $LogsDir "callrecords_v4_$(Get-Date -Format 'yyyy-MM-dd').log"
 
     Add-Content -Path $logFile -Value $logLine
 
@@ -99,7 +96,7 @@ function Export-AttendanceExcel {
         New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
     }
 
-    $filePath = Join-Path $OutputDir "callrecords_v3_$($ReportDate.ToString('yyyy-MM-dd')).xlsx"
+    $filePath = Join-Path $OutputDir "callrecords_v4_$($ReportDate.ToString('yyyy-MM-dd')).xlsx"
 
     if (Test-Path $filePath) { Remove-Item $filePath }
 
@@ -123,7 +120,7 @@ function Remove-OldAttendanceFiles {
     )
 
     $cutoff = (Get-Date).AddDays(-$RetentionDays)
-    Get-ChildItem -Path $OutputDir -Filter "callrecords_v3_*.xlsx" -ErrorAction SilentlyContinue |
+    Get-ChildItem -Path $OutputDir -Filter "callrecords_v4_*.xlsx" -ErrorAction SilentlyContinue |
         Where-Object { $_.LastWriteTime -lt $cutoff } |
         ForEach-Object {
             Remove-Item $_.FullName
@@ -187,10 +184,7 @@ function Invoke-GraphRest {
     }
 }
 
-# ── Graph $batch helper with per-item retry ──
-# Sends up to 20 requests per HTTP call.  If individual items come back
-# 429/503/504, they are collected and retried in a subsequent batch with
-# exponential backoff — only the failed items, not the entire batch.
+# ── Graph $batch helper with per-item retry (used in main thread) ──
 function Invoke-GraphBatch {
     param(
         [array]$Requests,       # Array of @{ Id; Method; Url }
@@ -327,7 +321,7 @@ $endIso   = $endUtc.ToString('yyyy-MM-ddTHH:mm:ssZ')
 # ── Script-level timer ──
 $scriptTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-Write-Log -Message "=== Call Records approach (v3 — chunked parallel batch) ===" -LogsDir $config.logsDir
+Write-Log -Message "=== Call Records approach (v4 — fully parallel) ===" -LogsDir $config.logsDir
 Write-Log -Message "Target date: $($TargetDate.ToString('yyyy-MM-dd')) | UTC range: $startIso to $endIso | Teachers: $($teachers.Count) | ThrottleLimit: $ThrottleLimit" -LogsDir $config.logsDir
 
 # ── Pre-capture config scalars for parallel workers ──
@@ -343,9 +337,6 @@ Connect-MgGraph -TenantId $config.tenantId -ClientSecretCredential $credential -
 Write-Log -Message "Connected to Microsoft Graph" -LogsDir $config.logsDir
 
 # ── Acquire raw access token with expiry tracking ──
-# ForEach-Object -Parallel runspaces don't share the Graph SDK context,
-# so we acquire a token via client credentials and use Invoke-RestMethod directly.
-# We also pass credentials so parallel workers can refresh mid-run.
 $tokenTenantId = $config.tenantId
 $tokenClientId = $config.clientId
 $tokenClientSecret = $config.clientSecret
@@ -376,13 +367,23 @@ function Refresh-TokenIfNeeded {
 
 # ── Helper: Paginated Graph request via Invoke-MgGraphRequest ──
 function Invoke-MgGraphPaged {
-    param([string]$Uri)
-    $items = [System.Collections.Generic.List[object]]::new()
-    $next  = $Uri
+    param([string]$Uri, [string]$LogsDir)
+    $items    = [System.Collections.Generic.List[object]]::new()
+    $next     = $Uri
+    $pageNum  = 0
     while ($next) {
+        $pageNum++
         $resp = Invoke-MgGraphRequest -Uri $next -Method GET -OutputType PSObject
         if ($resp.value) { $items.AddRange($resp.value) }
         $next = $resp.'@odata.nextLink'
+
+        if ($pageNum % 10 -eq 0 -or -not $next) {
+            $status = "Phase 1: Fetching call records — page $pageNum, $($items.Count) records so far..."
+            Write-Progress -Activity "Teams Attendance Export (v4)" -Status $status -PercentComplete 5
+            if ($LogsDir) {
+                Write-Log -Message "  Pagination: page $pageNum fetched — $($items.Count) records so far$(if (-not $next) { ' (done)' })" -LogsDir $LogsDir
+            }
+        }
     }
     return $items
 }
@@ -393,14 +394,14 @@ function Invoke-MgGraphPaged {
 
 $phase1Timer = [System.Diagnostics.Stopwatch]::StartNew()
 
-Write-Progress -Activity "Teams Attendance Export (v3)" -Status "Phase 1: Discovering meetings via Call Records..." -PercentComplete 5
+Write-Progress -Activity "Teams Attendance Export (v4)" -Status "Phase 1: Discovering meetings via Call Records..." -PercentComplete 5
 Write-Log -Message "Phase 1: Listing call records for $($TargetDate.ToString('yyyy-MM-dd'))..." -LogsDir $config.logsDir
 
 $callRecordsUri = "/v1.0/communications/callRecords" +
                   "?`$filter=startDateTime ge $startIso and startDateTime lt $endIso" +
                   "&`$select=id,type,startDateTime,endDateTime,joinWebUrl,organizer"
 
-$allCallRecords = Invoke-MgGraphPaged -Uri $callRecordsUri
+$allCallRecords = Invoke-MgGraphPaged -Uri $callRecordsUri -LogsDir $config.logsDir
 
 Write-Log -Message "  Total call records returned: $($allCallRecords.Count)" -LogsDir $config.logsDir
 
@@ -431,7 +432,7 @@ $skippedByOid         = 0
 $addedByOid           = 0
 $oidFilterIndex       = 0
 
-Write-Progress -Activity "Teams Attendance Export (v3)" -Status "Phase 1: Oid-first filtering ($($nonTeacherRecords.Count) records)..." -PercentComplete 15
+Write-Progress -Activity "Teams Attendance Export (v4)" -Status "Phase 1: Oid-first filtering ($($nonTeacherRecords.Count) records)..." -PercentComplete 15
 
 foreach ($cr in $nonTeacherRecords) {
     $oidFilterIndex++
@@ -528,7 +529,13 @@ if ($allMeetingsToProcess.Count -eq 0) {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 2a: Resolve meetings via $batch (with $select for smaller payloads)
+# PHASE 2a: Resolve meetings via PARALLEL $batch
+#
+# v3 sent batches of 20 sequentially (1 HTTP call at a time).
+# v4 chunks candidates into groups of 200, then dispatches chunks across
+# parallel workers.  Each worker sends its 200 candidates as 10 sequential
+# $batch calls of 20, but multiple workers run concurrently.
+# At ThrottleLimit=10, this gives ~10x throughput.
 # ══════════════════════════════════════════════════════════════════════════════
 
 $resolvedMeetings = [System.Collections.Generic.List[object]]::new()
@@ -537,8 +544,8 @@ if ($allMeetingsToProcess.Count -gt 0) {
     $phase2aTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
     Refresh-TokenIfNeeded
-    Write-Progress -Activity "Teams Attendance Export (v3)" -Status "Phase 2a: Resolving meetings via `$batch API..." -PercentComplete 30
-    Write-Log -Message "Phase 2a: Resolving $($allMeetingsToProcess.Count) meetings via `$batch API..." -LogsDir $config.logsDir
+    Write-Progress -Activity "Teams Attendance Export (v4)" -Status "Phase 2a: Resolving meetings via parallel `$batch API..." -PercentComplete 30
+    Write-Log -Message "Phase 2a: Resolving $($allMeetingsToProcess.Count) meetings via parallel `$batch API..." -LogsDir $config.logsDir
 
     # ── Build candidate info for each meeting ──
     $meetingCandidates = [System.Collections.Generic.List[object]]::new()
@@ -566,9 +573,14 @@ if ($allMeetingsToProcess.Count -gt 0) {
 
         if ($teacherForRow -and $candidateUserIds.Count -gt 0) {
             $meetingCandidates.Add([PSCustomObject]@{
-                CallRecord       = $cr
-                CandidateUserIds = $candidateUserIds
-                TeacherForRow    = $teacherForRow
+                CallRecordId     = $cr.id
+                JoinWebUrl       = $cr.joinWebUrl
+                StartDateTime    = [string]$cr.startDateTime
+                EndDateTime      = [string]$cr.endDateTime
+                CandidateUserIds = @($candidateUserIds)  # Force to array for serialisation
+                TeacherName      = $teacherForRow.displayName
+                TeacherEmail     = $teacherForRow.mail
+                TeacherDept      = $teacherForRow.department
                 EncodedJoinUrl   = [Uri]::EscapeDataString($cr.joinWebUrl)
             })
         }
@@ -579,127 +591,323 @@ if ($allMeetingsToProcess.Count -gt 0) {
 
     Write-Log -Message "  Meeting candidates prepared: $($meetingCandidates.Count)" -LogsDir $config.logsDir
 
-    # ── Batch resolve meetings — try first candidate for each (with $select) ──
-    $batchRequests = @($meetingCandidates | ForEach-Object {
-        $uid = $_.CandidateUserIds[0]
-        @{
-            Id     = $_.CallRecord.id
-            Method = "GET"
-            Url    = "/users/$uid/onlineMeetings?`$filter=JoinWebUrl eq '$($_.EncodedJoinUrl)'"
-        }
+    # ── Split candidates into chunks for parallel workers ──
+    # Each chunk gets 200 candidates → 10 sequential $batch calls of 20 per worker
+    $resolutionChunkSize = 200
+    $resolutionChunks = [System.Collections.Generic.List[object[]]]::new()
+    for ($i = 0; $i -lt $meetingCandidates.Count; $i += $resolutionChunkSize) {
+        $end = [Math]::Min($i + $resolutionChunkSize - 1, $meetingCandidates.Count - 1)
+        $resolutionChunks.Add(@($meetingCandidates[$i..$end]))
+    }
+
+    Write-Log -Message "  Created $($resolutionChunks.Count) resolution chunks of up to $resolutionChunkSize candidates each" -LogsDir $config.logsDir
+
+    # ── Thread-safe progress for Phase 2a ──
+    $totalResChunks = $resolutionChunks.Count
+    $resProgress = [hashtable]::Synchronized(@{
+        Done = 0; Resolved = 0; Failed = 0; Retried = 0; Throttled = 0
     })
+    $resLogInterval = [math]::Max(1, [math]::Min(50, [math]::Ceiling($totalResChunks / 10)))
 
-    $batchResponses = if ($batchRequests.Count -gt 0) {
-        Invoke-GraphBatch -Requests $batchRequests -AccessToken $accessToken
-    }
-    else {
-        [System.Collections.Generic.Dictionary[string, object]]::new()
-    }
+    # ── Parallel resolution: each worker resolves its chunk via $batch ──
+    $parallelResults = $resolutionChunks | ForEach-Object -Parallel {
+        $chunk = $_
 
-    # Parse batch results
-    $retryList = [System.Collections.Generic.List[object]]::new()
+        # Import from parent scope
+        $token         = $using:accessToken
+        $tokenExpiry   = $using:tokenExpiresAt
+        $tenantId      = $using:tokenTenantId
+        $clientId      = $using:tokenClientId
+        $clientSecret  = $using:tokenClientSecret
+        $progress      = $using:resProgress
+        $totalChk      = $using:totalResChunks
+        $logEvery      = $using:resLogInterval
+        $graphBatchUri = "https://graph.microsoft.com/v1.0/`$batch"
 
-    foreach ($mc in $meetingCandidates) {
-        $resp = $batchResponses[$mc.CallRecord.id]
-        $meeting = $null
-
-        if ($resp -and $resp.status -eq 200 -and $resp.body.value) {
-            $meetingValues = @($resp.body.value)
-            if ($meetingValues.Count -gt 0) { $meeting = $meetingValues[0] }
+        $headers = @{
+            Authorization  = "Bearer $token"
+            'Content-Type' = 'application/json'
         }
 
-        if ($meeting) {
-            $resolvedMeetings.Add([PSCustomObject]@{
-                Meeting       = $meeting
-                MeetingUserId = $mc.CandidateUserIds[0]
-                TeacherForRow = $mc.TeacherForRow
-                CallRecord    = $mc.CallRecord
-            })
-        }
-        elseif ($mc.CandidateUserIds.Count -gt 1) {
-            $retryList.Add($mc)
-        }
-        else {
-            $respStatus = if ($resp) { $resp.status } else { 'null' }
-            Write-Log -Message "  No meeting found for call record $($mc.CallRecord.id) (batch status: $respStatus)" -Level "WARN" -LogsDir $config.logsDir
-        }
-    }
-
-    # ── Retry failed resolutions with alternate candidates ──
-    if ($retryList.Count -gt 0) {
-        Refresh-TokenIfNeeded
-        Write-Log -Message "  Retrying $($retryList.Count) meeting(s) with alternate candidates..." -LogsDir $config.logsDir
-
-        $retryBatchRequests = @($retryList | ForEach-Object {
-            $uid = $_.CandidateUserIds[1]
-            @{
-                Id     = $_.CallRecord.id
-                Method = "GET"
-                Url    = "/users/$uid/onlineMeetings?`$filter=JoinWebUrl eq '$($_.EncodedJoinUrl)'"
+        # ── Local: refresh token if near expiry ──
+        if ([datetime]::UtcNow -ge $tokenExpiry.AddMinutes(-5)) {
+            try {
+                $tBody = @{
+                    client_id = $clientId; client_secret = $clientSecret
+                    scope = "https://graph.microsoft.com/.default"; grant_type = "client_credentials"
+                }
+                $tResp = Invoke-RestMethod `
+                    -Uri "https://login.microsoftonline.com/$tenantId/oauth2/v2.0/token" `
+                    -Method POST -Body $tBody -ContentType "application/x-www-form-urlencoded"
+                $token = $tResp.access_token
+                $headers.Authorization = "Bearer $token"
             }
-        })
+            catch { }
+        }
 
-        $retryBatchResponses = Invoke-GraphBatch -Requests $retryBatchRequests -AccessToken $accessToken
+        # ── Local: Send-GraphBatch (same as v3 Phase 2b) ──
+        function Send-GraphBatch {
+            param(
+                [array]$Requests,
+                [hashtable]$Headers,
+                [string]$BatchUri,
+                [hashtable]$ProgressState,
+                [int]$MaxItemRetries = 3
+            )
 
-        foreach ($mc in $retryList) {
-            $resp = $retryBatchResponses[$mc.CallRecord.id]
-            $meeting = $null
+            $results = @{}
+            $pending = [System.Collections.Generic.List[object]]::new($Requests)
 
-            if ($resp -and $resp.status -eq 200 -and $resp.body.value) {
-                $meetingValues = @($resp.body.value)
-                if ($meetingValues.Count -gt 0) { $meeting = $meetingValues[0] }
-            }
+            for ($retry = 0; $retry -le $MaxItemRetries -and $pending.Count -gt 0; $retry++) {
+                $nextPending = [System.Collections.Generic.List[object]]::new()
 
-            if ($meeting) {
-                $resolvedMeetings.Add([PSCustomObject]@{
-                    Meeting       = $meeting
-                    MeetingUserId = $mc.CandidateUserIds[1]
-                    TeacherForRow = $mc.TeacherForRow
-                    CallRecord    = $mc.CallRecord
-                })
-            }
-            else {
-                # Try remaining candidates sequentially (rare — 3+ candidates)
-                $found = $false
-                for ($ci = 2; $ci -lt $mc.CandidateUserIds.Count; $ci++) {
-                    $uid = $mc.CandidateUserIds[$ci]
-                    try {
-                        $meetingUri = "https://graph.microsoft.com/v1.0/users/$uid/onlineMeetings?`$filter=JoinWebUrl eq '$($mc.EncodedJoinUrl)'"
-                        $result = Invoke-GraphRest -Uri $meetingUri -AccessToken $accessToken
-                        $m = $result.value | Select-Object -First 1
-                        if ($m) {
-                            $resolvedMeetings.Add([PSCustomObject]@{
-                                Meeting       = $m
-                                MeetingUserId = $uid
-                                TeacherForRow = $mc.TeacherForRow
-                                CallRecord    = $mc.CallRecord
-                            })
-                            $found = $true
+                for ($i = 0; $i -lt $pending.Count; $i += 20) {
+                    $end   = [Math]::Min($i + 19, $pending.Count - 1)
+                    $slice = @($pending[$i..$end])
+
+                    $body = @{
+                        requests = @($slice | ForEach-Object {
+                            @{ id = $_.id; method = $_.method; url = $_.url }
+                        })
+                    } | ConvertTo-Json -Depth 10
+
+                    $batchResp = $null
+                    for ($att = 1; $att -le 4; $att++) {
+                        try {
+                            $batchResp = Invoke-RestMethod -Uri $BatchUri -Method POST `
+                                            -Headers $Headers -Body $body
                             break
                         }
+                        catch {
+                            $sc = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                            if (($sc -in @(429, 503, 504)) -and $att -lt 4) {
+                                if ($sc -eq 429 -and $ProgressState) { $ProgressState.Throttled++ }
+                                $waitSec = [math]::Pow(2, $att)
+                                if ($sc -eq 429) {
+                                    try {
+                                        $raVals = $null
+                                        if ($_.Exception.Response.Headers.TryGetValues('Retry-After', [ref]$raVals)) {
+                                            $parsed = [int]($raVals | Select-Object -First 1)
+                                            if ($parsed -gt 0) { $waitSec = [math]::Max($parsed, $waitSec) }
+                                        }
+                                    } catch { }
+                                }
+                                Start-Sleep -Seconds $waitSec
+                            }
+                            else { throw }
+                        }
                     }
-                    catch { }
+
+                    if (-not $batchResp -or -not $batchResp.responses) { continue }
+
+                    foreach ($r in $batchResp.responses) {
+                        if ($r.status -in @(429, 503, 504)) {
+                            if ($r.status -eq 429 -and $ProgressState) { $ProgressState.Throttled++ }
+                            $original = $slice | Where-Object { $_.id -eq $r.id } | Select-Object -First 1
+                            if ($original) { $nextPending.Add($original) }
+                        }
+                        else {
+                            $results[$r.id] = $r
+                        }
+                    }
                 }
-                if (-not $found) {
-                    Write-Log -Message "  No meeting found for call record $($mc.CallRecord.id) after $($mc.CandidateUserIds.Count) candidates" -Level "WARN" -LogsDir $config.logsDir
+
+                if ($nextPending.Count -gt 0 -and $retry -lt $MaxItemRetries) {
+                    Start-Sleep -Seconds ([math]::Pow(2, $retry + 1))
+                }
+                $pending = $nextPending
+            }
+
+            return $results
+        }
+
+        try {
+            # ── First pass: try CandidateUserIds[0] for each candidate ──
+            $batchRequests = @($chunk | ForEach-Object {
+                @{
+                    id     = $_.CallRecordId
+                    method = "GET"
+                    url    = "/users/$($_.CandidateUserIds[0])/onlineMeetings?`$filter=JoinWebUrl eq '$($_.EncodedJoinUrl)'"
+                }
+            })
+
+            $batchResponses = Send-GraphBatch -Requests $batchRequests -Headers $headers `
+                                              -BatchUri $graphBatchUri -ProgressState $progress
+
+            # ── Parse results, collect retries ──
+            $retryList = [System.Collections.Generic.List[object]]::new()
+
+            foreach ($mc in $chunk) {
+                $resp = $batchResponses[$mc.CallRecordId]
+                $meeting = $null
+
+                if ($resp -and $resp.status -eq 200 -and $resp.body.value) {
+                    $meetingValues = @($resp.body.value)
+                    if ($meetingValues.Count -gt 0) { $meeting = $meetingValues[0] }
+                }
+
+                if ($meeting) {
+                    $progress.Resolved++
+                    # Emit resolved meeting info
+                    [PSCustomObject]@{
+                        _Type          = 'Resolved'
+                        MeetingId      = $meeting.id
+                        MeetingSubject = $meeting.subject
+                        MeetingUserId  = $mc.CandidateUserIds[0]
+                        TeacherName    = $mc.TeacherName
+                        TeacherEmail   = $mc.TeacherEmail
+                        TeacherDept    = $mc.TeacherDept
+                        StartDateTime  = $mc.StartDateTime
+                        EndDateTime    = $mc.EndDateTime
+                        CallRecordId   = $mc.CallRecordId
+                    }
+                }
+                elseif ($mc.CandidateUserIds.Count -gt 1) {
+                    $retryList.Add($mc)
+                }
+                else {
+                    $progress.Failed++
+                    [PSCustomObject]@{
+                        _Type        = 'Failed'
+                        CallRecordId = $mc.CallRecordId
+                        Reason       = "No meeting found (status: $(if ($resp) { $resp.status } else { 'null' }))"
+                        Candidates   = 1
+                    }
                 }
             }
+
+            # ── Retry with alternate candidates ──
+            if ($retryList.Count -gt 0) {
+                $progress.Retried += $retryList.Count
+
+                $retryBatchRequests = @($retryList | ForEach-Object {
+                    @{
+                        id     = $_.CallRecordId
+                        method = "GET"
+                        url    = "/users/$($_.CandidateUserIds[1])/onlineMeetings?`$filter=JoinWebUrl eq '$($_.EncodedJoinUrl)'"
+                    }
+                })
+
+                $retryResponses = Send-GraphBatch -Requests $retryBatchRequests -Headers $headers `
+                                                  -BatchUri $graphBatchUri -ProgressState $progress
+
+                foreach ($mc in $retryList) {
+                    $resp = $retryResponses[$mc.CallRecordId]
+                    $meeting = $null
+
+                    if ($resp -and $resp.status -eq 200 -and $resp.body.value) {
+                        $meetingValues = @($resp.body.value)
+                        if ($meetingValues.Count -gt 0) { $meeting = $meetingValues[0] }
+                    }
+
+                    if ($meeting) {
+                        $progress.Resolved++
+                        [PSCustomObject]@{
+                            _Type          = 'Resolved'
+                            MeetingId      = $meeting.id
+                            MeetingSubject = $meeting.subject
+                            MeetingUserId  = $mc.CandidateUserIds[1]
+                            TeacherName    = $mc.TeacherName
+                            TeacherEmail   = $mc.TeacherEmail
+                            TeacherDept    = $mc.TeacherDept
+                            StartDateTime  = $mc.StartDateTime
+                            EndDateTime    = $mc.EndDateTime
+                            CallRecordId   = $mc.CallRecordId
+                        }
+                    }
+                    else {
+                        # Try remaining candidates (3+) sequentially — rare
+                        $found = $false
+                        for ($ci = 2; $ci -lt $mc.CandidateUserIds.Count; $ci++) {
+                            $uid = $mc.CandidateUserIds[$ci]
+                            try {
+                                $meetingUri = "https://graph.microsoft.com/v1.0/users/$uid/onlineMeetings?`$filter=JoinWebUrl eq '$($mc.EncodedJoinUrl)'"
+                                $result = Invoke-RestMethod -Uri $meetingUri -Headers $headers
+                                $m = $result.value | Select-Object -First 1
+                                if ($m) {
+                                    $progress.Resolved++
+                                    [PSCustomObject]@{
+                                        _Type          = 'Resolved'
+                                        MeetingId      = $m.id
+                                        MeetingSubject = $m.subject
+                                        MeetingUserId  = $uid
+                                        TeacherName    = $mc.TeacherName
+                                        TeacherEmail   = $mc.TeacherEmail
+                                        TeacherDept    = $mc.TeacherDept
+                                        StartDateTime  = $mc.StartDateTime
+                                        EndDateTime    = $mc.EndDateTime
+                                        CallRecordId   = $mc.CallRecordId
+                                    }
+                                    $found = $true
+                                    break
+                                }
+                            }
+                            catch { }
+                        }
+                        if (-not $found) {
+                            $progress.Failed++
+                            [PSCustomObject]@{
+                                _Type        = 'Failed'
+                                CallRecordId = $mc.CallRecordId
+                                Reason       = "No meeting found after $($mc.CandidateUserIds.Count) candidates"
+                                Candidates   = $mc.CandidateUserIds.Count
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch {
+            # If entire chunk fails, mark all as failed
+            $progress.Failed += $chunk.Count
+            foreach ($mc in $chunk) {
+                [PSCustomObject]@{
+                    _Type        = 'Failed'
+                    CallRecordId = $mc.CallRecordId
+                    Reason       = "Chunk error: $_"
+                    Candidates   = $mc.CandidateUserIds.Count
+                }
+            }
+        }
+        finally {
+            $progress.Done++
+            $done = $progress.Done
+            $pct  = [math]::Min(100, [int](($done / [math]::Max($totalChk, 1)) * 100))
+
+            Write-Progress -Activity "Phase 2a: Parallel meeting resolution" `
+                -Status "$done / $totalChk chunks ($pct%) — resolved: $($progress.Resolved), failed: $($progress.Failed), throttled: $($progress.Throttled)" `
+                -PercentComplete $pct
+
+            if ($done % $logEvery -eq 0 -or $done -eq $totalChk) {
+                $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+                Write-Host "$ts | INFO |   Phase 2a: $done / $totalChk chunks ($pct%) — resolved: $($progress.Resolved), failed: $($progress.Failed), throttled: $($progress.Throttled)"
+            }
+        }
+    } -ThrottleLimit $ThrottleLimit
+
+    Write-Progress -Activity "Phase 2a: Parallel meeting resolution" -Completed
+
+    # ── Collect results from parallel pipeline ──
+    $parallelResults = @($parallelResults)
+
+    $failedCount = 0
+    foreach ($result in $parallelResults) {
+        if ($result._Type -eq 'Resolved') {
+            $resolvedMeetings.Add($result)
+        }
+        elseif ($result._Type -eq 'Failed') {
+            $failedCount++
+            Write-Log -Message "  No meeting found for call record $($result.CallRecordId): $($result.Reason)" -Level "WARN" -LogsDir $config.logsDir
         }
     }
 
     $phase2aTimer.Stop()
     $phaseTimers['Phase2a'] = $phase2aTimer.Elapsed
-    Write-Log -Message "  Resolved meetings: $($resolvedMeetings.Count) of $($meetingCandidates.Count) in $([math]::Round($phase2aTimer.Elapsed.TotalSeconds, 1))s" -LogsDir $config.logsDir
+    Write-Log -Message "  Resolved meetings: $($resolvedMeetings.Count) of $($meetingCandidates.Count) in $([math]::Round($phase2aTimer.Elapsed.TotalSeconds, 1))s ($failedCount failed, $($resProgress.Throttled) throttled)" -LogsDir $config.logsDir
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 2b: Fetch attendance via Chunked-Parallel-Batch
-#
-# Instead of one HTTP call per meeting (v2), we group 20 meetings into one
-# $batch request.  Each parallel worker processes a chunk of 20 meetings:
-#   Batch 1 → GET attendanceReports for 20 meetings  (1 HTTP call)
-#   Batch 2 → GET attendanceRecords for all reports   (1+ HTTP calls)
-# This reduces HTTP round-trips by up to 20x compared to v2.
+# PHASE 2b: Fetch attendance via Chunked-Parallel-Batch (same as v3)
 # ══════════════════════════════════════════════════════════════════════════════
 
 $allResults = @()
@@ -707,25 +915,33 @@ $allResults = @()
 if ($resolvedMeetings.Count -gt 0) {
     $phase2bTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-    Write-Progress -Activity "Teams Attendance Export (v3)" -Status "Phase 2b: Chunked batch attendance for $($resolvedMeetings.Count) meetings..." -PercentComplete 45
+    Write-Progress -Activity "Teams Attendance Export (v4)" -Status "Phase 2b: Chunked batch attendance for $($resolvedMeetings.Count) meetings..." -PercentComplete 45
     Write-Log -Message "Phase 2b: Fetching attendance for $($resolvedMeetings.Count) meetings via chunked parallel batch (ThrottleLimit $ThrottleLimit)..." -LogsDir $config.logsDir
 
     # ── Build serializable work items ──
-    # Complex objects (PSCustomObject from Graph) don't always survive parallel
-    # runspace serialisation cleanly.  We flatten to simple scalar properties.
+    # In v4, resolved meetings from Phase 2a are already flat scalars
+    $skippedNullDates = 0
     $workItems = foreach ($rm in $resolvedMeetings) {
+        if ([string]::IsNullOrWhiteSpace($rm.StartDateTime) -or
+            [string]::IsNullOrWhiteSpace($rm.EndDateTime)) {
+            $skippedNullDates++
+            continue
+        }
         [PSCustomObject]@{
-            MeetingId      = $rm.Meeting.id
-            MeetingSubject = $rm.Meeting.subject
+            MeetingId      = $rm.MeetingId
+            MeetingSubject = $rm.MeetingSubject
             MeetingUserId  = $rm.MeetingUserId
-            TeacherName    = $rm.TeacherForRow.displayName
-            TeacherEmail   = $rm.TeacherForRow.mail
-            TeacherDept    = $rm.TeacherForRow.department
-            StartDateTime  = [string]$rm.CallRecord.startDateTime
-            EndDateTime    = [string]$rm.CallRecord.endDateTime
+            TeacherName    = $rm.TeacherName
+            TeacherEmail   = $rm.TeacherEmail
+            TeacherDept    = $rm.TeacherDept
+            StartDateTime  = [string]$rm.StartDateTime
+            EndDateTime    = [string]$rm.EndDateTime
         }
     }
     $workItems = @($workItems)
+    if ($skippedNullDates -gt 0) {
+        Write-Log -Message "  Skipped $skippedNullDates meeting(s) with null start/end timestamps" -LogsDir $config.logsDir -Level 'WARN'
+    }
 
     # ── Split work items into chunks of 20 (the $batch limit) ──
     $chunkSize     = 20
@@ -782,9 +998,7 @@ if ($resolvedMeetings.Count -gt 0) {
                 $token = $tResp.access_token
                 $headers.Authorization = "Bearer $token"
             }
-            catch {
-                # If refresh fails, continue with current token — it may still work
-            }
+            catch { }
         }
 
         # ── Local: Send-GraphBatch with outer + inner retry ──
@@ -803,7 +1017,6 @@ if ($resolvedMeetings.Count -gt 0) {
             for ($retry = 0; $retry -le $MaxItemRetries -and $pending.Count -gt 0; $retry++) {
                 $nextPending = [System.Collections.Generic.List[object]]::new()
 
-                # Process in sub-chunks of 20 (in case a single worker has >20 record requests)
                 for ($i = 0; $i -lt $pending.Count; $i += 20) {
                     $end   = [Math]::Min($i + 19, $pending.Count - 1)
                     $slice = @($pending[$i..$end])
@@ -814,7 +1027,6 @@ if ($resolvedMeetings.Count -gt 0) {
                         })
                     } | ConvertTo-Json -Depth 10
 
-                    # Outer retry: if the $batch endpoint itself returns 429/503/504
                     $batchResp = $null
                     for ($att = 1; $att -le 4; $att++) {
                         try {
@@ -844,7 +1056,6 @@ if ($resolvedMeetings.Count -gt 0) {
 
                     if (-not $batchResp -or -not $batchResp.responses) { continue }
 
-                    # Inner: check per-item status
                     foreach ($r in $batchResp.responses) {
                         if ($r.status -in @(429, 503, 504)) {
                             if ($r.status -eq 429 -and $ProgressState) { $ProgressState.Throttled++ }
@@ -904,11 +1115,6 @@ if ($resolvedMeetings.Count -gt 0) {
                     })
                     $rptIdx++
                 }
-
-                # NOTE: If a report response contains @odata.nextLink (>50 reports),
-                # the remaining pages are not fetched.  This is extremely rare for a
-                # single meeting's reports within one day.  A future enhancement could
-                # detect nextLink and issue follow-up calls here.
             }
 
             if ($recordRequests.Count -gt 0) {
@@ -924,13 +1130,17 @@ if ($resolvedMeetings.Count -gt 0) {
                     $resp = $recordResponses[$key]
                     if ($resp.status -ne 200 -or -not $resp.body) { continue }
 
-                    # Parse composite key "meetingIdx_reportIdx"
                     $parts      = $key -split '_', 2
                     $meetingIdx = [int]$parts[0]
                     $wi         = $chunk[$meetingIdx]
 
-                    $mStart = [datetime]$wi.StartDateTime
-                    $mEnd   = [datetime]$wi.EndDateTime
+                    # Guard against null/empty/unparseable timestamps
+                    $mStart = [datetime]::MinValue
+                    $mEnd   = [datetime]::MinValue
+                    if (-not [datetime]::TryParse([string]$wi.StartDateTime, [ref]$mStart) -or
+                        -not [datetime]::TryParse([string]$wi.EndDateTime,   [ref]$mEnd)) {
+                        continue
+                    }
 
                     $records = $resp.body.attendanceRecords
                     if (-not $records) { continue }
@@ -941,12 +1151,18 @@ if ($resolvedMeetings.Count -gt 0) {
                                       ($rec.totalAttendanceInSeconds / $meetingSec) * 100
                                   } else { 100 }
 
-                        $joinDt  = if ($rec.attendanceIntervals -and @($rec.attendanceIntervals).Count -gt 0) {
-                                       [datetime]$rec.attendanceIntervals[0].joinDateTime
-                                   } else { $null }
-                        $leaveDt = if ($rec.attendanceIntervals -and @($rec.attendanceIntervals).Count -gt 0) {
-                                       [datetime]$rec.attendanceIntervals[-1].leaveDateTime
-                                   } else { $null }
+                        $joinDt  = $null
+                        $leaveDt = $null
+                        if ($rec.attendanceIntervals -and @($rec.attendanceIntervals).Count -gt 0) {
+                            $tmpJoin  = [datetime]::MinValue
+                            $tmpLeave = [datetime]::MinValue
+                            if ([datetime]::TryParse([string]$rec.attendanceIntervals[0].joinDateTime, [ref]$tmpJoin)) {
+                                $joinDt = $tmpJoin
+                            }
+                            if ([datetime]::TryParse([string]$rec.attendanceIntervals[-1].leaveDateTime, [ref]$tmpLeave)) {
+                                $leaveDt = $tmpLeave
+                            }
+                        }
 
                         $lateCutoff = $mStart.AddMinutes($lateMin)
                         $status = if ($attPct -lt $partialPct)                  { "Partial" }
@@ -955,7 +1171,6 @@ if ($resolvedMeetings.Count -gt 0) {
 
                         $chunkRecordCount++
 
-                        # Emit row directly into the pipeline
                         [PSCustomObject]@{
                             Date             = $mStart.ToString('yyyy-MM-dd')
                             TeacherName      = $wi.TeacherName
@@ -1016,7 +1231,7 @@ if ($resolvedMeetings.Count -gt 0) {
 
 $phase3Timer = [System.Diagnostics.Stopwatch]::StartNew()
 
-Write-Progress -Activity "Teams Attendance Export (v3)" -Status "Phase 3: Exporting to Excel..." -PercentComplete 90
+Write-Progress -Activity "Teams Attendance Export (v4)" -Status "Phase 3: Exporting to Excel..." -PercentComplete 90
 Write-Log -Message "Phase 3: Export" -LogsDir $config.logsDir
 Write-Log -Message "  Meetings resolved: $($resolvedMeetings.Count)" -LogsDir $config.logsDir
 Write-Log -Message "  Attendance records: $($allResults.Count)" -LogsDir $config.logsDir
@@ -1041,7 +1256,7 @@ $phaseTimers['Phase3'] = $phase3Timer.Elapsed
 
 Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
 
-Write-Progress -Activity "Teams Attendance Export (v3)" -Completed
+Write-Progress -Activity "Teams Attendance Export (v4)" -Completed
 
 $scriptTimer.Stop()
 
@@ -1050,11 +1265,11 @@ $scriptTimer.Stop()
 # ══════════════════════════════════════════════════════════════════════════════
 
 $summaryLines = @(
-    "=== v3 Performance Summary ==="
+    "=== v4 Performance Summary ==="
     "  Phase 1  (discovery)  : $([math]::Round(($phaseTimers['Phase1']).TotalSeconds, 1))s — $($allCallRecords.Count) call records, $($allMeetingsToProcess.Count) teacher meetings"
 )
 if ($phaseTimers['Phase2a']) {
-    $summaryLines += "  Phase 2a (resolution) : $([math]::Round(($phaseTimers['Phase2a']).TotalSeconds, 1))s — $($resolvedMeetings.Count) resolved via `$batch"
+    $summaryLines += "  Phase 2a (resolution) : $([math]::Round(($phaseTimers['Phase2a']).TotalSeconds, 1))s — $($resolvedMeetings.Count) resolved via parallel `$batch ($($resolutionChunks.Count) chunks × $ThrottleLimit workers)"
 }
 if ($phaseTimers['Phase2b']) {
     $summaryLines += "  Phase 2b (attendance) : $([math]::Round(($phaseTimers['Phase2b']).TotalSeconds, 1))s — $($meetingChunks.Count) chunks × $ThrottleLimit workers, $($allResults.Count) records"

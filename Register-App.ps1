@@ -57,7 +57,8 @@ $permissionNames = @(
     "User.Read.All",
     "Group.Read.All",
     "Calendars.Read",
-    "CallRecords.Read.All"
+    "CallRecords.Read.All",
+    "Mail.Send"
 )
 
 $resourceAccess = @()

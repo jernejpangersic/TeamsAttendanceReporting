@@ -103,6 +103,40 @@ try {
     $teachers | ConvertTo-Json -Depth 3 | Set-Content $outputPath -Encoding UTF8
 
     Write-Log "$($teachers.Count) teachers synced to $outputPath"
+
+    # ── Update recipients.json (merge new departments, preserve existing entries) ──
+    $recipientsPath = Join-Path (Split-Path $ConfigPath -Parent) "recipients.json"
+
+    $existing = @{}
+    if (Test-Path $recipientsPath) {
+        $raw = Get-Content $recipientsPath -Encoding UTF8 | ConvertFrom-Json
+        foreach ($prop in $raw.PSObject.Properties) {
+            $existing[$prop.Name] = @($prop.Value)
+        }
+    }
+
+    $departments = $teachers | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_.department)) { '_No Department' } else { $_.department }
+    } | Sort-Object -Unique
+
+    $merged = [ordered]@{}
+    $merged['_example'] = 'Enter recipient emails as shown: "Department Name": ["admin@school.edu", "it@school.edu"]'
+    foreach ($dept in $departments) {
+        if ($existing.ContainsKey($dept)) {
+            $merged[$dept] = $existing[$dept]
+        } else {
+            $merged[$dept] = @("")
+        }
+    }
+    # Preserve departments in existing file that are no longer in the teacher list
+    foreach ($key in $existing.Keys) {
+        if (-not $merged.Contains($key)) {
+            $merged[$key] = $existing[$key]
+        }
+    }
+
+    $merged | ConvertTo-Json -Depth 3 | Set-Content $recipientsPath -Encoding UTF8
+    Write-Log "recipients.json updated — $($departments.Count) department(s)"
 }
 catch {
     Write-Log "Failed to sync teachers: $_" "ERROR"
