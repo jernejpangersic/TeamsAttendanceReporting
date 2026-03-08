@@ -8,7 +8,6 @@
       - Phase 1 time-sharding: the 24-hour UTC window is split into sub-ranges
         (default 6 × 4 h) that are paginated in parallel, cutting discovery from
         ~2 h to ~20-30 min for large tenants.
-      - $top=999 on call-record pages to minimise HTTP round-trips.
       - Robust DateTime handling: TryParse replaces direct casts so a single bad
         timestamp no longer kills an entire chunk of 20 meetings.
       - Adaptive throttling: workers monitor the 429 rate via a shared state
@@ -25,7 +24,6 @@
 
     Key optimisations over v4:
       - Phase 1 parallelized: ~4-6× faster discovery (time-sharded pagination)
-      - $top=999 reduces page count by ~5× vs default 100-per-page
       - TryParse for DateTime: bad timestamps skip one record instead of 20
       - Adaptive throttling: safe to run at higher ThrottleLimit (default 15)
 
@@ -394,8 +392,7 @@ function New-AdaptiveThrottleState {
 #
 # v4 paginated the entire 24 h window sequentially (~2 h for 97k records).
 # v5 splits the UTC range into DiscoveryShards sub-ranges and paginates each
-# in its own parallel worker.  Each page requests $top=999 to minimise
-# round-trips.  Results are merged and deduplicated afterwards.
+# in its own parallel worker.  Results are merged and deduplicated afterwards.
 # ══════════════════════════════════════════════════════════════════════════════
 
 $phase1Timer = [System.Diagnostics.Stopwatch]::StartNew()
@@ -490,8 +487,7 @@ $shardResults = $timeShards | ForEach-Object -Parallel {
     $items    = [System.Collections.Generic.List[object]]::new()
     $nextUri  = "https://graph.microsoft.com/v1.0/communications/callRecords" +
                 "?`$filter=startDateTime ge $($shard.StartIso) and startDateTime lt $($shard.EndIso)" +
-                "&`$select=id,type,startDateTime,endDateTime,joinWebUrl,organizer" +
-                "&`$top=999"
+                "&`$select=id,type,startDateTime,endDateTime,joinWebUrl,organizer"
     $pageNum  = 0
 
     while ($nextUri) {
@@ -1516,7 +1512,7 @@ $scriptTimer.Stop()
 
 $summaryLines = @(
     "=== v5 Performance Summary ==="
-    "  Phase 1  (discovery)  : $([math]::Round(($phaseTimers['Phase1']).TotalSeconds, 1))s — $($allCallRecords.Count) call records, $($allMeetingsToProcess.Count) teacher meetings ($($timeShards.Count) shards × `$top=999)"
+    "  Phase 1  (discovery)  : $([math]::Round(($phaseTimers['Phase1']).TotalSeconds, 1))s — $($allCallRecords.Count) call records, $($allMeetingsToProcess.Count) teacher meetings ($($timeShards.Count) shards)"
 )
 if ($p1Adaptive.PeakDelayMs -gt 0) {
     $summaryLines += "    Adaptive throttle   : peak $($p1Adaptive.PeakDelayMs)ms, final $($p1Adaptive.CurrentDelayMs)ms"
