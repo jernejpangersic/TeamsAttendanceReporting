@@ -11,9 +11,8 @@ Built for M365 Education tenants (A3/A5) using School Data Sync, targeting scena
 - Exports to Excel (.xlsx) with one file per day
 - Parallel processing with adaptive throttling (auto-adjusts delay based on 429 rate)
 - Built-in Graph API retry handling (429/503/504) with exponential back-off
-- Two extraction strategies:
-  - `Get-Attendance.ps1` — polls each teacher's online meetings (straightforward, sequential)
-  - `Get-AttendanceViaCallRecords-v5.ps1` — uses Call Records as discovery layer with time-sharded parallel processing (recommended for large tenants)
+- Uses Call Records API as discovery layer with time-sharded parallel processing (`Get-AttendanceViaCallRecords-v5.ps1`, recommended for large tenants)
+- Includes `Get-AttendanceViaCallRecords-v4.ps1` as a simpler alternative with sequential discovery
 
 ## Project Structure
 
@@ -120,7 +119,6 @@ After the script finishes, **grant admin consent** in the Azure portal:
 | `OnlineMeetingArtifact.Read.All` | Read attendance reports |
 | `User.Read.All` | Resolve user identities |
 | `Group.Read.All` | Read teacher group membership |
-| `Calendars.Read` | *(Only for `Get-Attendance.ps1` calendar variant)* |
 | `Mail.Send` | Send per-department reports via email |
 
 4. Click **Grant admin consent**

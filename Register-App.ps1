@@ -56,7 +56,6 @@ $permissionNames = @(
     "OnlineMeetings.Read.All",
     "User.Read.All",
     "Group.Read.All",
-    "Calendars.Read",
     "CallRecords.Read.All",
     "Mail.Send"
 )
