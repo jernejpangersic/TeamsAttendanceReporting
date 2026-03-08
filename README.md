@@ -27,7 +27,7 @@ Built for M365 Education tenants (A3/A5) using School Data Sync, targeting scena
 ├── Get-AttendanceViaCallRecords-v4.ps1 ← Call Records with parallel resolution + attendance
 ├── Get-AttendanceViaCallRecords-v5.ps1 ← Call Records with time-sharding + adaptive throttle (recommended)
 ├── archive/                          ← Older script versions (< v4, gitignored)
-├── Split-AttendanceByDepartment.ps1 ← Splits Excel output into per-department files
+├── Split-AttendanceByDepartment.ps1 ← Splits Excel output into per-department files (logged via Write-Log)
 ├── Send-AttendanceReports.ps1       ← Emails per-department files to school IT admins
 ├── Test-Setup.ps1                   ← Environment validation script
 ├── output/                          ← Generated Excel files (gitignored)
@@ -220,6 +220,9 @@ Output is saved to `output/callrecords_v5_YYYY-MM-DD.xlsx`.
 
 # Split all Excel files in .\output
 .\Split-AttendanceByDepartment.ps1
+
+# Use a different config file
+.\Split-AttendanceByDepartment.ps1 -ConfigPath .\config.test.json
 ```
 
 Creates a date-based subfolder (e.g., `output/2026-03-02/`) with one Excel file per department. When multiple source files share the same date, each gets its own folder named after the full filename stem (e.g., `output/callrecords_v5_2026-03-02/`).

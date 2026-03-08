@@ -14,6 +14,9 @@
     Optional. Path to a specific source Excel file. If omitted, all *.xlsx files
     in .\output that contain a YYYY-MM-DD date pattern are processed.
 
+.PARAMETER ConfigPath
+    Path to config.json. Default: .\config.json
+
 .EXAMPLE
     .\Split-AttendanceByDepartment.ps1 -ExcelPath .\output\callrecords_v5_2026-03-02.xlsx
 
@@ -23,11 +26,46 @@
 #>
 
 param(
-    [string]$ExcelPath
+    [string]$ExcelPath,
+    [string]$ConfigPath = ".\config.json"
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# ── Load config (for logsDir) ──
+if (-not (Test-Path $ConfigPath)) {
+    Write-Error "Config file not found: $ConfigPath"
+    return
+}
+$config = Get-Content $ConfigPath | ConvertFrom-Json
+
+if (-not (Test-Path $config.logsDir)) {
+    New-Item -Path $config.logsDir -ItemType Directory -Force | Out-Null
+}
+
+function Write-Log {
+    param(
+        [string]$Message,
+        [ValidateSet("INFO", "WARN", "ERROR")]
+        [string]$Level = "INFO"
+    )
+
+    $timestamp = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $logLine   = "$timestamp | $Level | $Message"
+    $logFile   = Join-Path $config.logsDir "split-department_$(Get-Date -Format 'yyyy-MM-dd').log"
+
+    Add-Content -Path $logFile -Value $logLine
+
+    switch ($Level) {
+        "ERROR" {
+            Write-Warning $logLine
+            Add-Content -Path (Join-Path $config.logsDir "errors.log") -Value $logLine
+        }
+        "WARN"  { Write-Warning $logLine }
+        default { Write-Host $logLine }
+    }
+}
 
 # ── Ensure ImportExcel module ──
 if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
@@ -67,8 +105,7 @@ if ($ExcelPath) {
         Write-Warning "No Excel files with a date pattern found in $baseDir"
         return
     }
-    Write-Host "Found $($filesToProcess.Count) Excel file(s) in $baseDir"
-    Write-Host ""
+    Write-Log "Found $($filesToProcess.Count) Excel file(s) in $baseDir"
 }
 
 # ── Group files by their date to decide folder naming ──
@@ -99,7 +136,7 @@ foreach ($file in $filesToProcess) {
         New-Item -Path $outputDir -ItemType Directory -Force | Out-Null
     }
 
-    Write-Host "Reading $($file.Name) ..."
+    Write-Log "Reading $($file.Name) ..."
     $rows = Import-Excel -Path $file.FullName
 
     if (-not $rows -or $rows.Count -eq 0) {
@@ -107,10 +144,10 @@ foreach ($file in $filesToProcess) {
         continue
     }
 
-    Write-Host "  $($rows.Count) rows imported."
+    Write-Log "  $($rows.Count) rows imported."
 
     $groups = $rows | Group-Object -Property Department
-    Write-Host "  $($groups.Count) department(s) found."
+    Write-Log "  $($groups.Count) department(s) found."
 
     foreach ($group in $groups) {
         $deptName = if ([string]::IsNullOrWhiteSpace($group.Name)) { '_No Department' } else { $group.Name }
@@ -121,11 +158,10 @@ foreach ($file in $filesToProcess) {
             -AutoSize -FreezeTopRow -AutoFilter -BoldTopRow `
             -ConditionalText $conditionalText
 
-        Write-Host "    [$($group.Group.Count) rows] -> $outPath"
+        Write-Log "    [$($group.Group.Count) rows] -> $outPath"
     }
 
-    Write-Host "  Done. $($groups.Count) file(s) written to $outputDir"
-    Write-Host ""
+    Write-Log "  Done. $($groups.Count) file(s) written to $outputDir"
 }
 
-Write-Host "All files processed."
+Write-Log "All files processed."
