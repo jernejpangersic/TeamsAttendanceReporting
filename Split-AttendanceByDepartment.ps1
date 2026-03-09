@@ -17,6 +17,9 @@
 .PARAMETER ConfigPath
     Path to config.json. Default: .\config.json
 
+.PARAMETER ThrottleLimit
+    Maximum number of departments to export in parallel. Default: 8
+
 .EXAMPLE
     .\Split-AttendanceByDepartment.ps1 -ExcelPath .\output\callrecords_v5_2026-03-02.xlsx
 
@@ -27,7 +30,8 @@
 
 param(
     [string]$ExcelPath,
-    [string]$ConfigPath = ".\config.json"
+    [string]$ConfigPath = ".\config.json",
+    [int]$ThrottleLimit = 8
 )
 
 Set-StrictMode -Version Latest
@@ -77,12 +81,12 @@ Import-Module ImportExcel
 # ── Characters illegal in Windows filenames ──
 $illegalChars = '[\\/:*?"<>|]'
 
-# ── Conditional formatting (same as the main script) ──
-$conditionalText = @(
-    New-ConditionalText -Text "Present" -BackgroundColor LightGreen
-    New-ConditionalText -Text "Late"    -BackgroundColor Yellow
-    New-ConditionalText -Text "Partial" -BackgroundColor Orange
-    New-ConditionalText -Text "Absent"  -BackgroundColor Red
+# ── Conditional formatting colours (passed into parallel workers) ──
+$conditionalDefs = @(
+    @{ Text = 'Present'; Color = 'LightGreen' }
+    @{ Text = 'Late';    Color = 'Yellow' }
+    @{ Text = 'Partial'; Color = 'Orange' }
+    @{ Text = 'Absent';  Color = 'Red' }
 )
 
 # ── Determine which files to process ──
@@ -147,18 +151,33 @@ foreach ($file in $filesToProcess) {
     Write-Log "  $($rows.Count) rows imported."
 
     $groups = $rows | Group-Object -Property Department
-    Write-Log "  $($groups.Count) department(s) found."
+    Write-Log "  $($groups.Count) department(s) found. Exporting in parallel (ThrottleLimit $ThrottleLimit) ..."
 
-    foreach ($group in $groups) {
+    $results = $groups | ForEach-Object -Parallel {
+        $group    = $_
+        $outDir   = $using:outputDir
+        $badChars = $using:illegalChars
+        $cfDefs   = $using:conditionalDefs
+
+        Import-Module ImportExcel
+
+        $conditionalText = $cfDefs | ForEach-Object {
+            New-ConditionalText -Text $_.Text -BackgroundColor $_.Color
+        }
+
         $deptName = if ([string]::IsNullOrWhiteSpace($group.Name)) { '_No Department' } else { $group.Name }
-        $safeName = ($deptName -replace $illegalChars, '_').Trim()
-        $outPath  = Join-Path $outputDir "$safeName.xlsx"
+        $safeName = ($deptName -replace $badChars, '_').Trim()
+        $outPath  = Join-Path $outDir "$safeName.xlsx"
 
         $group.Group | Export-Excel -Path $outPath -WorksheetName "Attendance" `
-            -AutoSize -FreezeTopRow -AutoFilter -BoldTopRow `
+            -FreezeTopRow -AutoFilter -BoldTopRow `
             -ConditionalText $conditionalText
 
-        Write-Log "    [$($group.Group.Count) rows] -> $outPath"
+        [PSCustomObject]@{ Dept = $deptName; Rows = $group.Group.Count; Path = $outPath }
+    } -ThrottleLimit $ThrottleLimit
+
+    foreach ($r in @($results)) {
+        Write-Log "    [$($r.Rows) rows] -> $($r.Path)"
     }
 
     Write-Log "  Done. $($groups.Count) file(s) written to $outputDir"

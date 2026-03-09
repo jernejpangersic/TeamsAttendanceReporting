@@ -221,6 +221,9 @@ Output is saved to `output/callrecords_v5_YYYY-MM-DD.xlsx`.
 
 # Use a different config file
 .\Split-AttendanceByDepartment.ps1 -ConfigPath .\config.test.json
+
+# Increase parallelism for faster export (default: 8)
+.\Split-AttendanceByDepartment.ps1 -ThrottleLimit 16
 ```
 
 Creates a date-based subfolder (e.g., `output/2026-03-02/`) with one Excel file per department. When multiple source files share the same date, each gets its own folder named after the full filename stem (e.g., `output/callrecords_v5_2026-03-02/`).
