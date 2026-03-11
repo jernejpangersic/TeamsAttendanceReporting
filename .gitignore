@@ -2,6 +2,7 @@
 *.json
 !*.sample.json
 
+
 # Output & logs
 output/
 logs/
@@ -9,6 +10,7 @@ logs/
 # Internal design documents
 01-Solution-Overview.md
 02-Implementation-Spec.md
+plan-teamsAttendanceReporting.prompt.prompt.md
 
 # Archived scripts (pre-v4)
 archive/

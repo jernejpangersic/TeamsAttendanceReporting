@@ -423,7 +423,7 @@ Write-Log -Message "  Created $($timeShards.Count) time shards" -LogsDir $config
 
 # ── Thread-safe progress for Phase 1 ──
 $p1Progress = [hashtable]::Synchronized(@{
-    Done = 0; Records = 0; Pages = 0
+    Done = 0; Records = 0; Pages = 0; Failed = 0
 })
 
 # ── Adaptive throttle state for Phase 1 ──
@@ -489,43 +489,50 @@ $shardResults = $timeShards | ForEach-Object -Parallel {
                 "?`$filter=startDateTime ge $($shard.StartIso) and startDateTime lt $($shard.EndIso)" +
                 "&`$select=id,type,startDateTime,endDateTime,joinWebUrl,organizer"
     $pageNum  = 0
+    $shardError = $null
 
-    while ($nextUri) {
-        $pageNum++
-        Invoke-AdaptiveDelay -State $adaptive
-        for ($att = 1; $att -le 4; $att++) {
-            try {
-                $resp = Invoke-RestMethod -Uri $nextUri -Headers $headers
-                Update-AdaptiveThrottle -State $adaptive -WasThrottled $false
-                break
-            }
-            catch {
-                $sc = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
-                if (($sc -in @(429, 503, 504)) -and $att -lt 4) {
-                    if ($sc -eq 429) {
-                        Update-AdaptiveThrottle -State $adaptive -WasThrottled $true
-                    }
-                    $waitSec = [math]::Pow(2, $att)
-                    if ($sc -eq 429) {
-                        try {
-                            $raVals = $null
-                            if ($_.Exception.Response.Headers.TryGetValues('Retry-After', [ref]$raVals)) {
-                                $parsed = [int]($raVals | Select-Object -First 1)
-                                if ($parsed -gt 0) { $waitSec = [math]::Max($parsed, $waitSec) }
-                            }
-                        } catch { }
-                    }
-                    Start-Sleep -Seconds $waitSec
+    try {
+        while ($nextUri) {
+            $pageNum++
+            Invoke-AdaptiveDelay -State $adaptive
+            for ($att = 1; $att -le 4; $att++) {
+                try {
+                    $resp = Invoke-RestMethod -Uri $nextUri -Headers $headers
+                    Update-AdaptiveThrottle -State $adaptive -WasThrottled $false
+                    break
                 }
-                else { throw }
+                catch {
+                    $sc = if ($_.Exception.Response) { [int]$_.Exception.Response.StatusCode } else { 0 }
+                    if (($sc -in @(429, 503, 504)) -and $att -lt 4) {
+                        if ($sc -eq 429) {
+                            Update-AdaptiveThrottle -State $adaptive -WasThrottled $true
+                        }
+                        $waitSec = [math]::Pow(2, $att)
+                        if ($sc -eq 429) {
+                            try {
+                                $raVals = $null
+                                if ($_.Exception.Response.Headers.TryGetValues('Retry-After', [ref]$raVals)) {
+                                    $parsed = [int]($raVals | Select-Object -First 1)
+                                    if ($parsed -gt 0) { $waitSec = [math]::Max($parsed, $waitSec) }
+                                }
+                            } catch { }
+                        }
+                        Start-Sleep -Seconds $waitSec
+                    }
+                    else { throw }
+                }
             }
-        }
 
-        if ($resp.value) {
-            $items.AddRange([object[]]$resp.value)
+            if ($resp.value) {
+                $items.AddRange([object[]]$resp.value)
+            }
+            $nextUri = $resp.'@odata.nextLink'
+            $progress.Pages++
         }
-        $nextUri = $resp.'@odata.nextLink'
-        $progress.Pages++
+    }
+    catch {
+        $shardError = "Shard $($shard.Index) ($($shard.StartIso) - $($shard.EndIso)) failed on page $pageNum after collecting $($items.Count) records: $_"
+        $progress.Failed++
     }
 
     $progress.Records += $items.Count
@@ -537,11 +544,12 @@ $shardResults = $timeShards | ForEach-Object -Parallel {
         -Status "Shard $done / $totalShd ($pct%) — $($progress.Records) total records, $($progress.Pages) pages" `
         -PercentComplete $pct
 
-    # Emit shard result
+    # Emit shard result (partial results preserved even on failure)
     [PSCustomObject]@{
-        ShardIndex = $shard.Index
-        Records    = @($items)
-        Pages      = $pageNum
+        ShardIndex   = $shard.Index
+        Records      = @($items)
+        Pages        = $pageNum
+        ErrorMessage = $shardError
     }
 } -ThrottleLimit $DiscoveryShards
 
@@ -550,11 +558,22 @@ Write-Progress -Activity "Phase 1: Parallel shard discovery" -Completed
 # ── Merge shard results ──
 $allCallRecords = [System.Collections.Generic.List[object]]::new()
 $totalPages     = 0
+$failedShards   = [System.Collections.Generic.List[string]]::new()
 foreach ($sr in $shardResults) {
     if ($sr.Records) {
         $allCallRecords.AddRange([object[]]$sr.Records)
     }
     $totalPages += $sr.Pages
+    if ($sr.ErrorMessage) {
+        $failedShards.Add($sr.ErrorMessage)
+    }
+}
+
+if ($failedShards.Count -gt 0) {
+    Write-Log -Message "  WARNING: $($failedShards.Count) shard(s) failed during discovery (partial results kept):" -Level "WARN" -LogsDir $config.logsDir
+    foreach ($err in $failedShards) {
+        Write-Log -Message "    $err" -Level "WARN" -LogsDir $config.logsDir
+    }
 }
 
 # Deduplicate by call record ID (shards may overlap at boundaries)
